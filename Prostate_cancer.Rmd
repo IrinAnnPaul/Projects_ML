@@ -1,0 +1,174 @@
+---
+title: "kNN to predict prostate cancer"
+author: "Irin Ann Paul"
+date: "02-04-24"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+## Data Collection
+
+The prostate cancer data was downloaded to the project folder along with the R notebook. The file is saved as "Prostate_Cancer.csv"
+
+## Data Preparation and Exploration
+
+```{r data_load}
+# set directory as the path to the data file
+setwd("C:/Users/irina/Documents/DA5030")
+
+#read file, convert every character vector to a factor
+prc <- read.csv("Prostate_Cancer.csv", stringsAsFactors = FALSE)
+
+str(prc)
+```
+
+
+There are 100 observations and 10 variables in this data set. The first column is for 'id', which can be removed in the next step since it isn't significant in making a kNN model. The patient diagnosis_result column shows the nature of the tumor in their prostate: wither Benign or Malignant. All other variables are numerical measures of the tumor.
+
+```{r data_prep1}
+# removing the id column from the data set
+prc <- prc[-1]
+
+```
+
+```{r data_prep2}
+# view the number of patients in categories 'Benign' (B), and 'Malignant' (M)
+# this is the target variable
+table(prc$diagnosis_result)
+
+# renaming 
+prc$diagnosis_result <- factor(prc$diagnosis_result, levels = c("B", "M"), labels = c("Benign", "Malignant"))
+
+# convert it to percentage and round up to 1 decimal point
+round(prop.table(table(prc$diagnosis)) * 100, digits = 1)
+
+```
+
+Out of the 100 observations, 38 were Benign tumors and 62 were Malignant. 
+
+
+```{r normalization}
+# function to normalize all variables:
+normalize <- function(x){
+  return((x - min(x)) / (max(x) - min(x)))
+}
+
+# normalization
+# starting from 2nd variable, since 1st is not numeric
+prc_norm <- as.data.frame(lapply(prc[2:9], normalize))
+
+# check status
+summary(prc_norm)
+
+```
+
+The data set is normalized to convert all numerical variables to a 0 - 1 scale. This ensures uniformity in scale.
+
+```{r split_data}
+# divide data into training and testing in 65:35 ratio
+prc_train <- prc_norm[1:65,]
+prc_test <- prc_norm[66:100,]
+
+
+# label the train and test datasets:
+# takes the target variable value of each observation
+prc_train_label <- prc[1:65, 1]
+prc_test_label <- prc[66:100, 1]
+
+```
+
+The prc data set is manually divided into train and test data in the ratio 65:35.
+
+## Training model on data
+
+```{r train_model}
+# load package
+library(class)
+
+# use knn function to train the model:
+# k value is usually sqr root of no. of obs
+prc_pred <- knn(train = prc_train, test = prc_test, cl = prc_train_label, k = 10)
+
+```
+
+The data is used in training a kNN model using the knn() function, with a k value of 10. This can be tweaked to improve the performance (accuracy) of the prediction.
+
+## Model Evaluation
+
+```{r}
+# load packages
+library(gmodels)
+
+ct_prc <- CrossTable(prc_test_label, prc_pred, prop.chisq = FALSE)
+ct_prc
+
+
+# accuracy
+accuracy <- ((ct_prc$t[1, 1] + ct_prc$t[2, 2]) / 35) * 100
+```
+There are 35 observations in the test data, out of which `r ct_prc$t[1, 1]` were True negatives(`r round(ct_prc$prop.tbl[1, 1], 1)`%) and `r ct_prc$t[2, 2]` were True positives(`r round(ct_prc$prop.tbl[2, 2], 1)`%). The model becomes dangerous if there are False negatives. 
+
+The total accuracy of the model was `r round(accuracy, 2)`% ((TP + TN)/35)
+Making changes to the k value and re-assigning train and test data might remove the False Negatives and increase the percentage of True positives.
+
+## kNN using Caret package
+
+```{r}
+
+# load package
+library(caret)
+
+# reproducibility
+set.seed(123)
+
+# partitioning data in 65:35 ratio
+prc_pred_caret <- createDataPartition(prc$diagnosis_result, times = 1, p = 0.65, list = FALSE)
+prc_train_caret <- prc[prc_pred_caret, ]
+prc_test_caret <- prc[ - prc_pred_caret, ]
+
+# pre-processing data (scaling the data, such that the mean is 0 and sd is 1)
+preProcPrc <- preProcess(prc_train_caret, method = c("center", "scale"))
+train_transf <- predict(preProcPrc, prc_train_caret)
+test_transf <- predict(preProcPrc, prc_test_caret)
+
+# model training 
+knnModel <- train(diagnosis_result ~ ., 
+                  data = train_transf, 
+                  method = "knn",
+                  trControl = trainControl(method = "cv"), # cross-validation
+                  tuneGrid = data.frame(k = c(9, 10, 11))) # try different values of k
+
+best_model<- knn3(
+                  diagnosis_result ~ .,
+                  data = train_transf,
+                  k = knnModel$bestTune$k
+                 )
+
+# Prediction
+prediction <- predict(best_model, test_transf, type = "class") # predict class labels of the test data set
+
+# Calculate confusion matrix
+cm <- confusionMatrix(prediction, test_transf$diagnosis_result, positive = "Malignant")
+cm
+
+```
+Here, I select the best model out of 3 based on different k values. 10 is taken since there are 100 observations. Numbers nearest to 10, 9 and 11 are considered here. `r knnModel$bestTune$k` gives the best model. 
+
+The confusion matrix for the kNN model using caret package is significantly high. Here, `r cm$table[1,1]` were True Negatives, and `r cm$table[2,2]` True Positives. The number of False negative is very low here (`r cm$table[1,2]`) and therefore makes the model more reliable.
+
+The model's accuracy is:
+`r round(cm$overall['Accuracy'] * 100, 1)`
+
+
+## Comparison of both models
+
+```{r}
+cm_both <- confusionMatrix(prc_pred, prc_test_label, positive = "Malignant")
+cm_both
+
+```
+
+The confusion matrix for kNN model using the kNN() function shows a lower accuracy:
+`r round(cm_both$overall['Accuracy'] * 100, 1)`
