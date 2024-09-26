@@ -1,4 +1,6 @@
-# An Ensemble Model to Predict Alzheimers using Handwriting data: Development and Evaluation
+# Alzheimer's_Prediction_Model
+
+Project : An Ensemble Model to Predict Alzheimers using Handwriting data: Development and Evaluation
 
 Aim : To predict Alzheimer's in individuals based on their handwriting features.
 
