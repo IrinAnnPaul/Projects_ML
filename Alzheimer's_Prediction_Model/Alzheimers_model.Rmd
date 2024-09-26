@@ -1,0 +1,720 @@
+---
+title: "An Ensemble Model to Predict Alzheimers using Handwriting data: Development and Evaluation"
+author: "Irin Ann Paul"
+date: "2024-04-12"
+output:
+  pdf_document: default
+  html_document: default
+    toc = true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraryLoad, echo=FALSE, warning=FALSE, message=FALSE}
+
+# installing all libraries required, and loading them
+
+# function to install library if not present:
+install_load_package <- function(package_name) {
+  if (!require(package_name, character.only = TRUE)) {
+    install.packages(package_name)
+    library(package_name, character.only = TRUE)
+  }
+}
+
+# List of required packages
+required_packages <- c("utils", "dplyr", "ggplot2", "randomForest", 
+                       "ggcorrplot", "irlba", "caret", "e1071",
+                       "xgboost", "pROC", "neuralnet", "tidyr")
+
+# Install and load required packages, do not print anything
+invisible(sapply(required_packages, install_load_package))
+
+
+```
+
+## DARWIN Dataset
+
+Neurodegenerative diseases pose a significant challenge in modern healthcare, with conditions like Alzheimer’s disease impacting millions of individuals worldwide. These diseases lead to the progressive deterioration of nerve cells, resulting in severe cognitive and motor impairments. While there is currently no cure for neurodegenerative diseases, early diagnosis plays a crucial role in slowing down their progression and improving the quality of life for affected individuals.
+
+Handwriting analysis is a promising approach for early detection of neurodegenerative diseases. Changes in handwriting dynamics can reflect underlying neurological conditions, offering a non-invasive and cost-effective diagnostic tool.
+
+The DARWIN dataset comprises handwriting samples collected from 174 participants, including both Alzheimer’s patients and healthy individuals serving as a control group. These samples were obtained during specific handwriting tasks designed to detect early signs of Alzheimer’s disease. It has 451 features extracted from each participant's handwriting
+
+In this project, I aim to use ML models to classify individuals as either Alzheimer’s patients or healthy controls based on their handwriting features.
+
+
+## Data Collection
+
+The data is publicly available in the [UCI Machine Learning Repository](https://archive.ics.uci.edu/dataset/732/darwin){style="color:blue"}. In this section, the URL to the zip file is downloaded into a temporary file to access the data as a data frame.
+
+```{r loadCsv, echo=FALSE, warning=FALSE, message=FALSE}
+
+# create a temporary folder for storing the zip file
+temp <- tempfile()
+
+# download the zip file to the folder and unzip 
+download.file("https://archive.ics.uci.edu/static/public/732/darwin.zip",temp)
+df <- read.csv(unz(temp, "data.csv"), stringsAsFactors = FALSE)
+unlink(temp)
+
+
+# removing the id column, since it is not important for classification
+df$ID <- NULL
+
+```
+
+## Exploring the Data
+
+The structure of the data set is explored in this section.
+
+```{r dataExp}
+# view the structure of the data
+str(df)
+
+```
+
+As observed in the strucure of the data set, there are 174 observations with 451 features. Most of the features are numeric or integers since they describe the handwriting. 
+
+18 features of handwriting from the 25 writing tasks developed by the researchers are stored in the 450 columns. They include features like pressure, dispersement, acceleration, depth, number of pendown and jerk on paper. 
+The column 'class' is character class. It has values 'P' and 'H', based on whether the person is a patient(P) or is healthy (H).
+
+Below is a table and a plot with the count of people with and without Alzheimer's from the data set:
+
+```{r NumClass, comment=NULL}
+# tabulate the count of patients and healthy volunteers
+class_counts <- table(df$class)
+print(class_counts)
+
+
+# plot of the class column
+ggplot(df, aes(x = class, fill = class)) +
+  geom_bar() +
+  labs(title = "Class Distribution within Groups",
+       x = "Class", y = "Count") +
+  theme_minimal()
+
+```
+
+There are `r class_counts[1]` patients and `r class_counts[2]` healthy individuals whose handwriting data were collected for this data set.
+
+As there are less samples for the data set, duplicates need to be checked before proceeding with any manipulations. 
+
+```{r dupeCheck, echo=FALSE}
+
+# Check for duplicates in the entire dataframe
+dup_rows <- duplicated(df)
+
+# Count the number of duplicate rows
+num_duplicates <- sum(dup_rows)
+
+# Print the number of duplicate rows
+cat("There are", num_duplicates, "duplicate rows in the data set")
+```
+
+## Cleaning and Shaping the Data
+
+### Inducing Missing Values
+
+Since the data comes from pre-designed handwriting tasks, there is almost **zero chance of missing values** in the features. Also, as the UCI repository information, there are no missing values in the data. But here we are inducing missing values to demonstrate how to impute or handle the missing values in DARWIN data set.
+
+Generally, 5% or less missing values in the data set is considered acceptable for building models on the data. I am inducing missing values to the data by randomly choosing 10 values each from 400 random columns. 
+This ensures that approximately 10% of the data is induced to be missing value. Each column selected randomly will have approximately 5% of data as missing values.
+
+Even though the percentage of data missing is very small, considering that it is a very small data set based on sample size, I am expecting an impact on the model performance. Comparison of models with the original data will be performed later in the pipeline.
+
+```{r induceNA}
+# checking the number of missing values in the data
+cat("Maximum missing values in any column of the original data set is", max(colSums(is.na(df))))
+
+# make a copy of df
+df_na <- df
+
+# removing values manually since there are none
+# Generate a list vector with 400 random values representing column indices
+random_cols <- sample(ncol(df_na)-1, 400, replace = FALSE)
+
+# Loop through each randomly selected column index
+for (col_index in random_cols) {
+  # Randomly select 10 row indices to remove
+  missing_row_indices <- sample(nrow(df_na), 10)
+  # Set the selected row indices in the current column to NA
+  df_na[missing_row_indices, col_index] <- NA
+}
+
+# compare maximum missing values in any column in original and new data set
+cat("\nMaximum missing values in any column of the updated data set is", max(colSums(is.na(df_na))))
+
+```
+### Handling Outliers
+
+Outliers in the data set can occur due to human error or calculations errors. These errors are inevitable since handwriting features are sensitive. But outliers in any data can affect the accuracy of a prediction model. Hence it needs to handled before proceeding.
+
+Median imputation will be appropriate in this case, where the outlier observations can be grouped based on 'class' column and replaced with the group median.
+For all further steps, both the original and the NA induced data frames will be processed for comparison.
+
+```{r VisOutliers}
+
+# view a boxplot of the first feature in data set
+boxplot(df_na$air_time1)
+
+# Function to replace outliers with median
+replace_outliers_with_median <- function(x) {
+  q <- quantile(x, probs = c(0.25, 0.75), na.rm = TRUE)
+  iqr <- IQR(x, na.rm = TRUE)
+  lower_bound <- q[1] - 1.5 * iqr
+  upper_bound <- q[2] + 1.5 * iqr
+  x_outliers <- x < lower_bound | x > upper_bound
+  x[x_outliers] <- median(x, na.rm = TRUE)
+  return(x)
+}
+
+# Apply the function to each numeric column except the last one ('class')
+df_na <- df_na %>%
+  group_by(class) %>%
+  mutate(across(where(is.numeric), replace_outliers_with_median)) %>%
+  ungroup()
+
+# applying the function to original data
+df <- df %>%
+  group_by(class) %>%
+  mutate(across(where(is.numeric), replace_outliers_with_median)) %>%
+  ungroup()
+
+# compare the first feature in the updated data frame
+boxplot(df_na$air_time1)
+
+```
+
+
+### Imputing Missing Data
+
+Value of each feature in the handwriting task could fall in the same range for people with neurodegenerative diseases like Alzheimer's. Since we have missing values in observations regardless of their disease status, they will be imputed using the category mean after grouping the values based on their class (disease status). 
+
+I used mean instead of median to avoid possible over fitting of the model built on such a small data set, since outliers were imputed with median values. Also, since there are no outliers anymore, we can rely on mean value with confidence.
+
+```{r imputeNA}
+
+# group the values based on 'class' column and replace NA with mean of that group
+df_na <- df_na %>%
+  group_by(class) %>%
+  mutate(across(where(is.numeric), ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)))
+
+```
+
+###  Binary Encoding Target variable
+
+The last column 'class', which is the target variable in this analysis is encoded using binary encoding. It is converted to 1 when class is 'P', and 0 when class is 'H'. This is done since most prediction models require numeric variables as target values.
+
+```{r encode}
+
+# use an if loop for binary classification
+df_na$class <- ifelse(df_na$class == 'P', 1, 0)
+
+# apply to the full data before imputation
+df$class <- ifelse(df$class == 'P', 1, 0)
+
+```
+
+### Standardization of Features
+
+Models like SVM and Neural Networks work best with standardized data and the other models that will be used work with or without standardization or normalization. Considering this, the DARWIN data will be standardized in the next step using the scale() function. This way all the values in the data set will be comparable, in a range of 
+
+```{r normdf}
+
+# storing the class column in another data frame
+class_col <- df_na$class
+
+# scaling new data, excluding the last column 'class'
+scaled_df_na <- as.data.frame(scale(as.matrix(df_na[,-ncol(df_na)])))
+
+# scaling original data
+scaled_df <- as.data.frame(scale(as.matrix(df[, -ncol(df)])))
+
+```
+
+
+The data frame has been standardized and stored in a new variable. The original data set before inducing missing values was also scaled. 
+
+## Dimensionality reduction
+
+Dimensionality reduction is crucial due to the "curse of dimensionality", a phenomenon where the sparsity of data increases as the number of features grows. This can hinder learning algorithms' ability to identify important patterns in between all the noise. To address this, systematic approaches are employed to get a balance between retaining essential information and discarding irrelevant details. By reducing the dimensionality of data, noise can be minimized, computational efficiency can be improved, and overfitting risks can be mitigated. This involves techniques like PCA, common factor analysis, and feature selection based on variance and correlation. Ultimately, dimensionality reduction aims to simplify the data representation while preserving its critical insights, enhancing the effectiveness and efficiency of the models in analyzing complex data sets, such as our DARWIN data set.
+
+Removing features with low correlation helps eliminate noise and irrelevant information which can adversely affect the performance of some machine learning models. By applying these preprocessing steps, I can create a more compact and informative representation of the data that is well-suited for subsequent analysis and modeling.
+
+## Filtering features based on correlation
+
+```{r corrFilt}
+# Compute correlation
+correlation_df <- cor(scaled_df)
+correlation_df_na <- cor(scaled_df_na)
+
+# Filter based on high correlation
+high_corr_columns_df <- findCorrelation(correlation_df, cutoff = 0.7)
+high_corr_columns_df_na <- findCorrelation(correlation_df_na, cutoff = 0.7)
+
+# Keep only highly correlated columns
+filtered_df <- scaled_df[, high_corr_columns_df]
+filtered_df_na <- scaled_df_na[,high_corr_columns_df_na]
+
+```
+
+
+### Principal Component Analysis (PCA)
+
+Principal Component Analysis (PCA) is a popular dimensionality reduction technique to transform high-dimensional data into a lower-dimensional space while preserving the most important information. It achieves this by identifying the directions, or principal components, that capture the maximum variance in the data.
+
+
+```{r pca}
+
+set.seed(123)
+
+# applying pca on the data set
+pca_na <- prcomp(scaled_df_na)
+screeplot(pca_na, npcs = 10, type = "lines",
+            main = "Scree Plot of DARWIN Imputed Data Principal Components")
+
+
+# applying pca on full data set
+pca_df <- prcomp(scaled_df)
+screeplot(pca_df, npcs = 11, type = "lines",
+          main = "Scree Plot of DARWIN Full Data Principal Components")
+
+```
+
+In the above plots, the variance explained by first 10 principal components is plotted as a screeplot, with the component number on x-axis and variance on y-axis.
+
+Both the scree plot for the imputed and full data shows that the most of the variance in the data can be explained by the principal components 1, 2 and 3. Since the graph makes an **elbow** around these values on the x-axis.
+
+But to get the accurate proportion of variance covered by these components can be determined by summarizing
+
+```{r pcaCont, results='hide'}
+
+# numerical summary of the pca 
+summary(pca_na)
+
+```
+The summary of the pca shows the standard deviation, proportion of variance and cumulative proportion of variance for each PC. The summary is not displayed here since there are 174 (same as number of rows) principal components created, most of which are not of importance for my analysis.
+
+But looking at the cumulative proportion of variance for the first 10 PCs being 0.378, we an infer that 37.8% of the variance in the data is explained by the first 10 components. Therefore, I will be using these in my classification models.
+
+The following code visualizes the features in the dataset that contributes to Principal component  1:
+
+```{r pcaVis}
+pca_long <- tibble(darwin = colnames(scaled_df),
+                           as_tibble(pca_df$rotation)) %>%
+  pivot_longer(PC1:PC10, names_to = "PC", values_to = "Contribution")
+
+pca_long %>%
+    filter(PC == "PC1") %>%
+    top_n(15, abs(Contribution)) %>%
+    mutate(darwin = reorder(darwin, Contribution)) %>%
+    ggplot(aes(darwin, Contribution, fill = darwin)) +
+      geom_col(show.legend = FALSE, alpha = 0.8) +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1,
+           vjust = 0.5),  axis.ticks.x = element_blank()) + 
+      labs(x = "Handwriting Feature",
+           y = "Relative Importance to Principal Component",
+           title = "Top 15 Contributors to PC1")
+
+```
+The plot shows the handwriting features on the x-axis and their relative importance to the principal component 1. Only the top 15 contributors are displayed.
+
+As seen, some features such as paper_time17 is negatively contributing to the PC, while mean_speed, gmrt_on_paper etc for the same task 17 is positively contributing as seen by their position on the plot.
+
+
+A new data set is created in the next step, combining only the top 10 principal components with the target variable column.
+
+```{r combPCA}
+# imputed data
+# combine the new data with reduced-dimension to the class column
+pca_comb_na <- data.frame(pca_na$x[,1:10], class = class_col)
+# converting the class column to factor
+pca_comb_na$class <- as.factor(pca_comb_na$class)
+
+# full data
+# combine the new data with reduced-dimension to the class column
+pca_comb <- data.frame(pca_df$x[,1:10], class = class_col)
+# converting the class column to factor
+pca_comb$class <- as.factor(pca_comb$class)
+
+```
+
+
+## Splitting Data into Training and Testing Data
+Regardless of the model, all predictive models require a training data to train the data on that model and a testing data to evaluate its performance. Splitting the data set in an 80:20 ratio is generally performed to achieve this. Since the data set is small and not shuffled in terms of target variable, I will be splitting the data in 80:20 ratio such that both the data sets have equal proportion of healthy individuals and patients (the target variable).
+
+```{r dataSplit}
+
+# Split data into training and testing sets
+set.seed(123)
+
+# index for splitting the data while maintaining balance in target variable value
+index <- createDataPartition(pca_comb_na$class, p = 0.8, list = FALSE, times = 1)
+
+# Split the data into training and testing sets based on the index
+train_data_na <- pca_comb_na[index, ]
+test_data_na <- pca_comb_na[-index, ]
+
+
+# repeat for full data
+# Split the data into training and testing sets based on the index
+train_data <- pca_comb[index, ]
+test_data <- pca_comb[-index, ]
+
+
+```
+
+Both the imputed and full data have been split into training and testing data according to this criteria.
+
+
+## Build the Models
+
+### Model 1: Random Forest
+
+#### Imputed Data
+
+```{r randomForest}
+# Random Forest
+
+set.seed(123)
+
+rf_model <- randomForest(x = train_data_na[-11],
+                         y = train_data_na$class)
+
+y_pred = predict(rf_model, newdata = test_data_na[-11], type = "response") 
+  
+# Confusion Matrix 
+confusion_mtx_rf = confusionMatrix(y_pred, test_data_na$class) 
+confusion_mtx_rf
+
+
+``` 
+In the above confusion matrix, the accuracy is 94.12%, indicating the overall proportion of correctly classified instances out of all instances. 
+Specifically, the accuracy implies that 94.12% of the cases, whether Alzheimer's patients (1) or healthy individuals (0), were correctly predicted by the model. True Positive Rate (Sensitivity) measures the proportion of actual Alzheimer's patients (1) that were correctly identified as such, which is reported as 100%. Similarly, True Negative Rate (Specificity) represents the proportion of actual healthy individuals (0) that were correctly classified, reported as 88.24%.
+
+#### Full Data
+
+```{r randomForestfull}
+# Random Forest
+
+set.seed(123)
+
+rf_model_df <- randomForest(x = train_data[-11],
+                         y = train_data$class)
+
+y_pred_df = predict(rf_model_df, newdata = test_data[-11], type = "response") 
+  
+# Confusion Matrix 
+confusion_mtx_rf_df = confusionMatrix(y_pred_df, test_data$class) 
+confusion_mtx_rf_df
+
+
+``` 
+
+Since both the model trained on full data and imputed data have similar accuracy, I can say that the imputation of missing values was carried out successfully. The model performance is evaluated in the following code based on accuracy, precision, recall, f1 score and roc value.
+
+
+
+**Accuracy** shows the overall correctness of a model's predictions, serving as a fundamental metric for evaluating its performance. 
+\[ Accuracy = \frac{TP + TN}{TP + TN + FP + FN} \]
+
+**Precision**, on the other hand, offers insight into the model's ability to make correct positive predictions, minimizing false positives. 
+\[ Precision = \frac{TP}{TP + FP} \]
+
+**Recall** complements precision by highlighting the model's effectiveness in capturing all positive instances within the dataset, crucial when missing positive cases is costly. In our case, missing the prediction of Alzheimer's will be a costly error.
+\[ Recall = \frac{TP}{TP + FN} \]
+
+The **F1 score** combines precision and recall, providing a balanced measure that considers both false positives and false negatives, offering a comprehensive assessment of the model's predictive power. 
+\[ F1 Score = 2 \times \frac{Precision \times Recall}{Precision + Recall} \]
+
+Lastly, the **ROC value and its AUC** provide a graphical representation of the model's ability to discriminate between positive and negative instances, crucial for understanding its discriminatory power across different thresholds.
+\[ \text{True Positive Rate (Sensitivity)} = \frac{TP}{TP + FN} \]
+\[ \text{False Positive Rate} = \frac{FP}{FP + TN} \]
+\[ AUC = \int_{0}^{1} \text{TPR}(fpr) \, dfpr \]
+
+
+Where:
+- \( TP \) = True Positives
+- \( TN \) = True Negatives
+- \( FP \) = False Positives
+- \( FN \) = False Negatives
+- TPR = True Positive Rate (Sensitivity)
+- FPR = False Positive Rate
+
+#### Evaluation of Model Performance
+
+```{r rfEval, warning=FALSE, echo=FALSE}
+
+# Calculate accuracy
+accuracy_rf <- sum(diag(confusion_mtx_rf$table)) / sum(confusion_mtx_rf$table)
+ 
+# Calculate precision
+precision_rf <- confusion_mtx_rf$byClass["Pos Pred Value"]
+
+# Calculate recall (sensitivity)
+recall_rf <- confusion_mtx_rf$byClass["Sensitivity"]
+
+# Calculate ROC AUC
+roc_obj_rf <- roc(as.numeric(test_data_na$class), as.numeric(y_pred))
+roc_auc_rf <- auc(roc_obj_rf)
+
+# Calculate F1 score
+f1_score_rf <- 2 * precision_rf * recall_rf / (precision_rf + recall_rf)
+
+
+# Print the metrics
+print(paste("Accuracy:", accuracy_rf))
+print(paste("Precision:", precision_rf))
+print(paste("Recall:", recall_rf))
+print(paste("ROC AUC:", roc_auc_rf))
+print(paste("F1 Score:", f1_score_rf))
+
+```
+
+
+
+
+### Model 2: SVM
+
+#### Imputed Data
+```{r SVM}
+# SVM
+set.seed(123)
+
+svm_model <- svm(class ~., data = train_data_na)
+svm_pred <- predict(svm_model, test_data_na)
+
+# confusion matrix
+confusion_mtx_svm <- confusionMatrix(svm_pred, test_data_na$class)
+confusion_mtx_svm 
+
+``` 
+
+In the above confusion matrix, the accuracy is exceptionally high at 97.06%, indicating that the model correctly classified the vast majority of instances. 
+Specifically, this accuracy suggests that 97.06% of both Alzheimer's patients (1) and healthy individuals (0) were accurately predicted by the model. The True Positive Rate (Sensitivity) is reported as 100%, illustrating that all actual Alzheimer's patients (1) were correctly identified as such. Similarly, the True Negative Rate (Specificity) is 94.12%, indicating that 94.12% of actual healthy individuals (0) were correctly classified. 
+
+
+#### Full Data
+```{r SVMfull}
+# SVM
+set.seed(123)
+
+svm_model_df <- svm(class ~., data = train_data)
+svm_pred_df <- predict(svm_model_df, test_data)
+
+# confusion matrix
+confusion_mtx_svm_df <- confusionMatrix(svm_pred_df, test_data$class)
+confusion_mtx_svm_df 
+
+``` 
+
+#### Evaluation of the Model Performance
+
+```{r svmEval, warning=FALSE, echo=FALSE}
+
+# Calculate accuracy
+accuracy_svm <- sum(diag(confusion_mtx_svm$table)) / sum(confusion_mtx_svm$table)
+
+# Calculate precision
+precision_svm <- confusion_mtx_svm$byClass["Pos Pred Value"]
+
+# Calculate recall (sensitivity)
+recall_svm <- confusion_mtx_svm$byClass["Sensitivity"]
+
+# Calculate ROC AUC
+roc_obj_svm <- roc(as.numeric(test_data_na$class), as.numeric(svm_pred))
+roc_auc_svm <- auc(roc_obj_svm)
+
+# Calculate F1 score
+f1_score_svm <- 2 * precision_svm * recall_svm/ (precision_svm + recall_svm)
+
+
+# Print the metrics
+print(paste("Accuracy:", accuracy_svm))
+print(paste("Precision:", precision_svm))
+print(paste("Recall:", recall_svm))
+print(paste("ROC AUC:", roc_auc_svm))
+print(paste("F1 Score:", f1_score_svm))
+
+
+```
+ 
+
+### Model 3: XGBoost
+
+#### Imputed Data
+
+```{r XGB}
+
+# XGBoost
+set.seed(123)
+
+# parameters for XGBoost
+params <- list(
+  objective = "binary:logistic", # Binary classification
+  max_depth = 4,                 # Maximum tree depth
+  eta = 0.01                    # Learning rate
+  )
+
+# Train the XGBoost model
+xgb_model <- xgboost(data = as.matrix(train_data_na[-11]),
+                     label = as.numeric(as.character(train_data_na$class)), params = params, nrounds = 1, nthread = 1)
+
+# Make predictions on the test set
+xgb_pred <- predict(xgb_model, as.matrix(test_data_na[-11]))
+
+# Convert predicted probabilities to class labels (0 or 1)
+xgb_pred <- ifelse(xgb_pred > 0.5, 1, 0)
+
+
+confusion_mtx_xgb <- confusionMatrix(factor(xgb_pred), factor(test_data_na$class))
+confusion_mtx_xgb
+
+
+``` 
+In the above confusion matrix, the accuracy is reported as 88.24%, indicating a strong performance in classifying instances correctly. 
+Specifically, this accuracy implies that 88.24% of both positive (1) and negative (0) instances were accurately predicted by the model. The Sensitivity, or True Positive Rate, is calculated at 94.12%, indicating the proportion of actual positive instances that were correctly identified. Meanwhile, the Specificity, or True Negative Rate, is reported as 82.35%, indicating the proportion of actual negative instances that were correctly classified. 
+
+#### Full Data
+
+```{r XGBfull}
+
+# XGBoost
+set.seed(123)
+
+# parameters for XGBoost
+params <- list(
+  objective = "binary:logistic", # Binary classification
+  max_depth = 4,                 # Maximum tree depth
+  eta = 0.01                    # Learning rate
+  )
+
+# Train the XGBoost model
+xgb_model_df <- xgboost(data = as.matrix(train_data[-11]),
+                     label = as.numeric(as.character(train_data$class)), params = params, nrounds = 1, nthread = 1)
+
+# Make predictions on the test set
+xgb_pred_df <- predict(xgb_model_df, as.matrix(test_data[-11]))
+
+# Convert predicted probabilities to class labels (0 or 1)
+xgb_pred_df <- ifelse(xgb_pred_df > 0.5, 1, 0)
+
+
+confusion_mtx_xgb_df <- confusionMatrix(factor(xgb_pred_df), factor(test_data$class))
+confusion_mtx_xgb_df
+
+
+``` 
+
+#### Evaluation of Model Performance
+
+```{r xgbEval, warning=FALSE, echo=FALSE}
+
+# Calculate accuracy
+accuracy_xgb <- sum(diag(confusion_mtx_xgb$table)) / sum(confusion_mtx_xgb$table)
+
+# Calculate precision
+precision_xgb <- confusion_mtx_xgb$byClass["Pos Pred Value"]
+
+# Calculate recall (sensitivity)
+recall_xgb <- confusion_mtx_xgb$byClass["Sensitivity"]
+
+# Calculate ROC AUC
+roc_obj_xgb <- roc(as.numeric(test_data_na$class), as.numeric(xgb_pred))
+roc_auc_xgb <- auc(roc_obj_xgb)
+
+# Calculate F1 score
+f1_score_xgb <- 2 * precision_xgb * recall_xgb / (precision_xgb + recall_xgb)
+
+
+# Print the metrics
+print(paste("Accuracy:", accuracy_xgb))
+print(paste("Precision:", precision_xgb))
+print(paste("Recall:", recall_xgb))
+print(paste("ROC AUC:", roc_auc_xgb))
+print(paste("F1 Score:", f1_score_xgb))
+
+
+```
+
+
+### Additional Model: ANN
+
+As an additional model, a simple ANN with 5 hidden nodes was created just to check the performance of the model
+
+```{r NN}
+
+# set seed
+set.seed(123)
+
+
+# train the model
+nn_model <- neuralnet(class ~ ., data = train_data_na, hidden = 5)
+
+# plot the model
+plot(nn_model, rep = "best")
+
+``` 
+
+
+```{r}
+# use the compute function
+model_results <- compute(nn_model, test_data_na[-11])
+
+# view the results
+predicted_strength <- model_results$net.result
+
+# check for correlation between predicted and actual value of class
+cor(predicted_strength, as.numeric(as.character(test_data_na$class)))
+
+```
+
+A correlation of 0.95 is strong enough to predict Alzheimer's in a person, but could be possibly improved by further hyperparameter tuning.
+
+
+## Ensemble Model
+
+Since the Random Forest model and the SVM performed best out of the 3 classification models, I will combine them as an ensemble to improve prediction. Combining XGboost reduced the performance, and hence was avoided in this step.
+
+The weighted average method uses accuracies as weights for each model.
+
+```{r ensemble}
+# Calculate weights based on accuracies
+weights <- c(accuracy_svm, accuracy_rf)
+
+# Normalize weights
+weights <- weights / sum(weights)
+
+# Combine predictions using a weighted average
+ensemble_pred <- (as.numeric(svm_pred) * weights[1] +
+                    as.numeric(y_pred) * weights[2]) / 2
+
+# Convert predicted values to factor with appropriate levels
+ensemble_pred_factor <- factor(ifelse(ensemble_pred > 0.5, 1, 0))
+
+# Convert actual class labels to factor with appropriate levels
+actual_labels <- factor(test_data_na$class)
+
+# Combine predicted values and actual labels into a data frame
+ensemble_data <- data.frame(ensemble_pred_factor, actual_labels)
+
+# Rename columns for clarity
+colnames(ensemble_data) <- c("Predicted", "Actual")
+
+# Calculate confusion matrix for the ensemble model
+ensemble_confusion_mtx <- confusionMatrix(ensemble_data$Predicted, ensemble_data$Actual)
+ensemble_confusion_mtx
+
+```
+The accuracy is still similar to that achieved by SVM alone. Hence we can conclude that both the ensemble model and the SVM model can be used to predict Alzheimer's disease in people based on the Handwriting tasks assigned as in the DARWIN method.
+These are the models that are highly accurate and producing least false negatives.
+
+
+
+
+
+
+
